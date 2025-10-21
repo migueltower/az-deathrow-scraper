@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 # scrape_deathrow.py
-# Updated version: includes Comments field, ensures blanks are written,
-# and more reliable navigation for each inmate page.
+# Updated: clicks the Search button on the Death Row Search page before collecting inmate links.
 
 import csv
 import time
@@ -12,9 +11,8 @@ from playwright.sync_api import sync_playwright
 
 MAIN_PAGE = "https://inmatedatasearch.azcorrections.gov/DeathRowSearch.aspx"
 OUTPUT_CSV = "death_row_inmates.csv"
-DELAY_BETWEEN = 2  # seconds between inmate visits
+DELAY_BETWEEN = 2
 
-# These are the element IDs found in your sample HTML
 FIELD_SELECTORS = {
     "adc_number": "#lblInmateNumber",
     "name": "#lblName",
@@ -27,7 +25,6 @@ FIELD_SELECTORS = {
 }
 
 def text_or_empty(page, selector):
-    """Return the inner text or image URL for the given selector."""
     try:
         el = page.query_selector(selector)
         if not el:
@@ -49,36 +46,49 @@ def main():
         context = browser.new_context()
         page = context.new_page()
 
-        # Step 1. Go to the main list page
-        print("Loading main list:", MAIN_PAGE)
+        # Step 1. Load the main search page
+        print("Loading main page:", MAIN_PAGE)
         page.goto(MAIN_PAGE, timeout=90000)
         time.sleep(2)
 
-        # Step 2. Find all inmate detail links
+        # Step 2. Click the "Search" button to load all inmate results
+        try:
+            search_button = page.query_selector("#btnSearch")
+            if search_button:
+                print("Clicking Search button to load inmate list...")
+                search_button.click()
+                # Wait for search results to load — look for any inmate links
+                page.wait_for_selector("a[href*='DeathRowSearchInmateInfo.aspx']", timeout=30000)
+                time.sleep(2)
+            else:
+                print("⚠️ Could not find Search button (#btnSearch). Page layout might have changed.")
+        except Exception as e:
+            print("⚠️ Error while trying to click Search:", e)
+
+        # Step 3. Collect inmate detail links
         inmate_links = []
         for a in page.query_selector_all("a[href]"):
             href = a.get_attribute("href") or ""
-            if "DeathRowSearch.aspx" in href and "ID=" in href:
+            if "DeathRowSearchInmateInfo.aspx" in href:
                 full_url = urljoin(MAIN_PAGE, href)
                 if full_url not in inmate_links:
                     inmate_links.append(full_url)
 
         print(f"Found {len(inmate_links)} inmate links.")
         if not inmate_links:
-            print("⚠️ No inmate links found — site layout may have changed.")
+            print("⚠️ Still no inmate links found — site layout may have changed.")
+            browser.close()
             return
 
-        # Step 3. Visit each inmate page
+        # Step 4. Visit each inmate page and extract details
         for idx, link in enumerate(inmate_links, 1):
             print(f"[{idx}/{len(inmate_links)}] Visiting: {link}")
             try:
                 page.goto(link, timeout=90000)
                 time.sleep(1.5)
-
                 row = {}
                 for field, selector in FIELD_SELECTORS.items():
                     row[field] = text_or_empty(page, selector)
-
                 row["source_url"] = link
                 row["scrape_time_utc"] = datetime.utcnow().isoformat() + "Z"
                 all_rows.append(row)
@@ -88,7 +98,7 @@ def main():
 
         browser.close()
 
-    # Step 4. Write CSV (always includes all fields)
+    # Step 5. Write CSV
     fieldnames = list(FIELD_SELECTORS.keys()) + ["source_url", "scrape_time_utc"]
     print("Writing CSV:", OUTPUT_CSV)
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
