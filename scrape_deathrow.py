@@ -1,59 +1,43 @@
 #!/usr/bin/env python3
 # scrape_deathrow.py
 # Scrapes Arizona DOC Death Row inmate data by emulating ASP.NET postbacks.
-# Works fully in GitHub Actions without JavaScript.
 
 import csv
 import time
 from datetime import datetime
-from urllib.parse import urljoin
+import re
 import requests
 from bs4 import BeautifulSoup
 
 BASE_URL = "https://inmatedatasearch.azcorrections.gov/DeathRowSearch.aspx"
 OUTPUT_CSV = "death_row_inmates.csv"
-DELAY_BETWEEN = 1.5  # polite delay
+DELAY_BETWEEN = 1.5  # seconds between inmates
+HEADERS = {"User-Agent": "Mozilla/5.0"}
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-}
-
-# Helper to extract hidden ASP.NET fields
 def get_hidden_fields(soup):
+    """Extracts ASP.NET hidden form fields required for postbacks."""
     fields = {}
     for key in ["__VIEWSTATE", "__VIEWSTATEGENERATOR", "__EVENTVALIDATION"]:
         tag = soup.find("input", {"name": key})
         fields[key] = tag["value"] if tag and "value" in tag.attrs else ""
     return fields
 
-# Helper to extract inmate detail text
 def get_inmate_fields(soup):
-    fields = {
-        "adc_number": "",
-        "name": "",
-        "comments": "",
-        "proceedings": "",
-        "aggravating": "",
-        "mitigating": "",
-        "pub_opinions": "",
-        "mug_image": "",
-    }
-
+    """Extracts inmate details from the detail page."""
     def get_text(id_):
-        tag = soup.find(id=id_)
-        return tag.get_text(strip=True) if tag else ""
-
-    fields["adc_number"] = get_text("lblInmateNumber")
-    fields["name"] = get_text("lblName")
-    fields["comments"] = get_text("lblComments")
-    fields["proceedings"] = get_text("lblProceedings")
-    fields["aggravating"] = get_text("lblAggrave")
-    fields["mitigating"] = get_text("lblMitigate")
-    fields["pub_opinions"] = get_text("lblOpinion")
-
-    img = soup.find("img", {"id": "ImgIMNO_Crime"})
-    fields["mug_image"] = img["src"] if img and "src" in img.attrs else ""
-    return fields
+        el = soup.find(id=id_)
+        return el.get_text(strip=True) if el else ""
+    img = soup.find("img", id="ImgIMNO_Crime")
+    return {
+        "adc_number": get_text("lblInmateNumber"),
+        "name": get_text("lblName"),
+        "comments": get_text("lblComments"),
+        "proceedings": get_text("lblProceedings"),
+        "aggravating": get_text("lblAggrave"),
+        "mitigating": get_text("lblMitigate"),
+        "pub_opinions": get_text("lblOpinion"),
+        "mug_image": img["src"] if img and img.has_attr("src") else "",
+    }
 
 def main():
     session = requests.Session()
@@ -61,27 +45,27 @@ def main():
 
     print("Starting scraper:", datetime.utcnow().isoformat() + "Z")
 
-    # Step 1: Load main list page
     resp = session.get(BASE_URL, timeout=60)
     soup = BeautifulSoup(resp.text, "html.parser")
-
     hidden = get_hidden_fields(soup)
-    rows = soup.select("#GVDeathRow tr.GridViewRow, #GVDeathRow tr.GridViewRowAlt")
 
-    # If alternating row styles aren't used, just use all "tr" rows with a link
-    if not rows:
-        rows = soup.select("#GVDeathRow tr")
-
-    print(f"Found {len(rows)} inmate rows on first page (more pages may exist).")
+    # Find all inmate link elements (the 'CrimeInfo' links)
+    links = soup.select("#GVDeathRow a[href*='CrimeInfo']")
+    if not links:
+        # Try fallback search using regex
+        links = soup.find_all("a", href=re.compile("CrimeInfo"))
+    print(f"Found {len(links)} inmate links on this page.")
 
     inmates = []
 
-    for row in rows:
-        link = row.find("a", id=lambda x: x and "CrimeInfo" in x)
-        if not link:
+    for i, link in enumerate(links, start=1):
+        # Extract the __doPostBack argument (e.g. GVDeathRow$ctl03$CrimeInfo)
+        href = link.get("href", "")
+        match = re.search(r"__doPostBack\('([^']+)'", href)
+        if not match:
             continue
-        event_target = link["id"].replace("_", "$")  # ASP.NET expects $ not _
-        print(f"Fetching detail for {link.text.strip()} (event target: {event_target})")
+        event_target = match.group(1)
+        print(f"[{i}/{len(links)}] Fetching inmate with EVENTTARGET={event_target}")
 
         # Prepare POST data for __doPostBack
         post_data = {
@@ -90,10 +74,8 @@ def main():
             **hidden,
         }
 
-        # Step 2: POST back to get inmate details
         detail = session.post(BASE_URL, data=post_data, headers=HEADERS, timeout=60)
         detail_soup = BeautifulSoup(detail.text, "html.parser")
-
         inmate_data = get_inmate_fields(detail_soup)
         inmate_data["source_url"] = BASE_URL
         inmate_data["scrape_time_utc"] = datetime.utcnow().isoformat() + "Z"
@@ -101,22 +83,22 @@ def main():
 
         time.sleep(DELAY_BETWEEN)
 
-        # Reload main list for next inmate (resets viewstate)
+        # Refresh main list and hidden fields between iterations
         resp = session.get(BASE_URL, timeout=60)
         soup = BeautifulSoup(resp.text, "html.parser")
         hidden = get_hidden_fields(soup)
 
-    # Step 3: Write CSV
+    # Write CSV
     fieldnames = [
-        "adc_number", "name", "comments", "proceedings", "aggravating",
-        "mitigating", "pub_opinions", "mug_image", "source_url", "scrape_time_utc"
+        "adc_number", "name", "comments", "proceedings",
+        "aggravating", "mitigating", "pub_opinions", "mug_image",
+        "source_url", "scrape_time_utc",
     ]
-
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for row in inmates:
-            writer.writerow(row)
+        for r in inmates:
+            writer.writerow(r)
 
     print(f"✅ Done. Scraped {len(inmates)} inmate records.")
     print(f"CSV saved as {OUTPUT_CSV}")
