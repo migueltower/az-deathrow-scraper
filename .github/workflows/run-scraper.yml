@@ -24,8 +24,8 @@ jobs:
         run: |
           python scrape_deathrow.py
 
-      - name: Upload CSV artifact
+      - name: Upload page snapshot
         uses: actions/upload-artifact@v4
         with:
-          name: death-row-csv
-          path: death_row_inmates.csv
+          name: page-html
+          path: page_snapshot.html
