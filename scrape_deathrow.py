@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 # scrape_deathrow.py
-# Requires: playwright
-# Usage: python scrape_deathrow.py
+# Updated version: includes Comments field, ensures blanks are written,
+# and more reliable navigation for each inmate page.
 
 import csv
 import time
 from datetime import datetime
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 
 from playwright.sync_api import sync_playwright
 
-MAIN_PAGE = "https://corrections.az.gov/death-row"
-INMATE_DOMAIN_PART = "inmatedatasearch.azcorrections.gov"
+MAIN_PAGE = "https://inmatedatasearch.azcorrections.gov/DeathRowSearch.aspx"
 OUTPUT_CSV = "death_row_inmates.csv"
-DELAY_BETWEEN = 1.5
+DELAY_BETWEEN = 2  # seconds between inmate visits
 
+# These are the element IDs found in your sample HTML
 FIELD_SELECTORS = {
-    "adc": "#lblInmateNumber",
+    "adc_number": "#lblInmateNumber",
     "name": "#lblName",
+    "comments": "#lblComments",
     "proceedings": "#lblProceedings",
     "aggravating": "#lblAggrave",
     "mitigating": "#lblMitigate",
-    "public_opinion": "#lblOpinion",
+    "pub_opinions": "#lblOpinion",
     "mug_image": "#ImgIMNO_Crime",
 }
 
@@ -40,70 +41,58 @@ def text_or_empty(page, selector):
 
 def main():
     print("Starting scraper:", datetime.utcnow().isoformat() + "Z")
-    rows = []
+    all_rows = []
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
         context = browser.new_context()
         page = context.new_page()
 
-        print("Loading main page:", MAIN_PAGE)
-        page.goto(MAIN_PAGE, timeout=60000)
-        time.sleep(1)
+        # Step 1. Go to the main list page
+        print("Loading main list:", MAIN_PAGE)
+        page.goto(MAIN_PAGE, timeout=90000)
+        time.sleep(2)
 
-        anchors = page.query_selector_all("a[href]")
-        links = []
-        for a in anchors:
+        # Step 2. Find all inmate detail links
+        inmate_links = []
+        for a in page.query_selector_all("a[href]"):
             href = a.get_attribute("href") or ""
-            if not href:
-                continue
-            full = urljoin(MAIN_PAGE, href)
-            if "DeathRowSearch.aspx" in full or INMATE_DOMAIN_PART in urlparse(full).netloc:
-                if full not in links:
-                    links.append(full)
+            if "DeathRowSearch.aspx" in href and "ID=" in href:
+                full_url = urljoin(MAIN_PAGE, href)
+                if full_url not in inmate_links:
+                    inmate_links.append(full_url)
 
-        if not links:
-            print("No inmate links found on main page. Trying the dedicated search host...")
-            search_root = "https://inmatedatasearch.azcorrections.gov/DeathRowSearch.aspx"
-            page.goto(search_root, timeout=60000)
-            time.sleep(1)
-            anchors = page.query_selector_all("a[href]")
-            for a in anchors:
-                href = a.get_attribute("href") or ""
-                full = urljoin(search_root, href)
-                if "DeathRowSearch.aspx" in full and full not in links:
-                    links.append(full)
+        print(f"Found {len(inmate_links)} inmate links.")
+        if not inmate_links:
+            print("⚠️ No inmate links found — site layout may have changed.")
+            return
 
-        print(f"Found {len(links)} candidate inmate links")
-
-        for idx, link in enumerate(links, start=1):
+        # Step 3. Visit each inmate page
+        for idx, link in enumerate(inmate_links, 1):
+            print(f"[{idx}/{len(inmate_links)}] Visiting: {link}")
             try:
-                print(f"[{idx}/{len(links)}] Visiting: {link}")
-                page.goto(link, timeout=60000)
-                page.wait_for_timeout(500)
-                data = {}
-                for key, selector in FIELD_SELECTORS.items():
-                    data[key] = text_or_empty(page, selector)
-                data["source_url"] = link
-                data["scrape_time_utc"] = datetime.utcnow().isoformat() + "Z"
-                rows.append(data)
-                time.sleep(DELAY_BETWEEN)
+                page.goto(link, timeout=90000)
+                time.sleep(1.5)
+
+                row = {}
+                for field, selector in FIELD_SELECTORS.items():
+                    row[field] = text_or_empty(page, selector)
+
+                row["source_url"] = link
+                row["scrape_time_utc"] = datetime.utcnow().isoformat() + "Z"
+                all_rows.append(row)
             except Exception as e:
-                print("  ERROR visiting", link, ":", str(e))
-                continue
+                print("❌ Error on", link, ":", e)
+            time.sleep(DELAY_BETWEEN)
 
         browser.close()
 
-    fieldnames = [
-        "adc", "name", "proceedings", "aggravating", "mitigating",
-        "public_opinion", "mug_image", "source_url", "scrape_time_utc"
-    ]
+    # Step 4. Write CSV (always includes all fields)
+    fieldnames = list(FIELD_SELECTORS.keys()) + ["source_url", "scrape_time_utc"]
+    print("Writing CSV:", OUTPUT_CSV)
     with open(OUTPUT_CSV, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for r in rows:
-            writer.writerow({k: r.get(k, "") for k in fieldnames})
-
-    print("Done. Rows scraped:", len(rows))
-
-if __name__ == "__main__":
-    main()
+        for row in all_rows:
+            # fill missing keys with blank strings
+            clean_row = {k: row.get(k, "")_
