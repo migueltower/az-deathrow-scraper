@@ -27,6 +27,7 @@ FIELD_SELECTORS = {
 }
 
 def text_or_empty(page, selector):
+    """Return the inner text or image URL for the given selector."""
     try:
         el = page.query_selector(selector)
         if not el:
@@ -94,5 +95,10 @@ def main():
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for row in all_rows:
-            # fill missing keys with blank strings
-            clean_row = {k: row.get(k, "")_
+            clean_row = {k: row.get(k, "") for k in fieldnames}
+            writer.writerow(clean_row)
+
+    print("✅ Done. Total inmates scraped:", len(all_rows))
+
+if __name__ == "__main__":
+    main()
